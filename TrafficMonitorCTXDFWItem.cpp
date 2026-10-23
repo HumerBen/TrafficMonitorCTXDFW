@@ -11,7 +11,7 @@ const wchar_t* CDragFullItem::GetItemId() const {
 }
 
 const wchar_t* CDragFullItem::GetItemLableText() const {
-    return L"虚";                    // 自绘模式下被忽略，仍提供
+    return g_plugin.GetIconChar().c_str();   // 自定义显示字（自绘模式下被忽略，仍提供）
 }
 
 const wchar_t* CDragFullItem::GetItemValueText() const {
@@ -19,7 +19,7 @@ const wchar_t* CDragFullItem::GetItemValueText() const {
 }
 
 const wchar_t* CDragFullItem::GetItemValueSampleText() const {
-    return L"虚";                    // 用于宽度估算
+    return g_plugin.GetIconChar().c_str();   // 用于宽度估算
 }
 
 bool CDragFullItem::IsCustomDraw() const {
@@ -34,7 +34,7 @@ int CDragFullItem::GetItemWidthEx(void* hDC) const {
         return 40;   // 兜底宽度
     HFONT hFont = g_plugin.CreateIconFont();
     HFONT hOld  = (HFONT)SelectObject(dc, hFont);
-    const wchar_t* sample = L"虚";
+    const wchar_t* sample = g_plugin.GetIconChar().c_str();
     SIZE sz = {0, 0};
     GetTextExtentPoint32W(dc, sample, static_cast<int>(wcslen(sample)), &sz);
     SelectObject(dc, hOld);
@@ -50,14 +50,14 @@ void CDragFullItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dark_
     int saved = SaveDC(dc);
     SetBkMode(dc, TRANSPARENT);   // 透明背景，沿用宿主底色
 
-    // “虚”图标颜色由用户在设置中指定
-    COLORREF iconColor = g_plugin.GetIconColor();
+    // “虚”字颜色按状态着色：检测到只剩虚线框→高亮红；未处理(被压制)→变暗灰；正常→用户设置色
+    COLORREF iconColor = g_plugin.StateColor();
 
     // 按用户设置的字体 / 粗体 / 字号绘制“虚”字
     HFONT hFont = g_plugin.CreateIconFont();
     HFONT hOld  = (HFONT)SelectObject(dc, hFont);
 
-    const wchar_t* icon = L"虚";
+    const wchar_t* icon = g_plugin.GetIconChar().c_str();
 
     // 垂直居中
     TEXTMETRIC tm = {0};
@@ -75,10 +75,10 @@ void CDragFullItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dark_
 
 int CDragFullItem::OnMouseEvent(MouseEventType type, int /*x*/, int /*y*/,
                                 void* /*hWnd*/, int /*flag*/) {
-    if (type == IPluginItem::MT_LCLICKED) {
-        g_plugin.FixNow();   // 左键单击 → 立即修复一次
-        return 1;            // 已完全处理，宿主不再做额外响应
+    if (type == MT_DBCLICKED) {
+        g_plugin.FixNow();   // 双击「虚」字 → 立即修复
+        return 1;            // 已完整处理，宿主不再做额外响应
     }
-    // 右键交给宿主：宿主的右键菜单里会带上本插件的命令（立即修复 / 自动修复）
+    // 其余（单击/右键等）交给宿主默认处理（右键菜单仍由宿主提供插件命令）
     return 0;
 }

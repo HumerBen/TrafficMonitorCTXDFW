@@ -12,10 +12,9 @@
 #define IDC_S_AUTOFIX      2003
 #define IDC_S_INTERVAL     2004
 #define IDC_S_APPLY        2005
-#define IDC_S_FONT         2006
-#define IDC_S_BOLD         2007
-#define IDC_S_SIZE         2008
+#define IDC_S_FONTBTN      2006   // “虚”字字体按钮（打开系统字体对话框）
 #define IDC_S_PREVIEW2     2009
+#define IDC_S_CHAR         2010   // 自定义显示字输入框
 
 // 设置对话框的工作数据（Apply 前暂存，Cancel 可丢弃）
 struct DlgData {
@@ -28,7 +27,24 @@ struct DlgData {
     bool    bold;
     int     fontSize;
     HFONT   iconFont;    // “虚”字预览字体，WM_DESTROY 释放
+    std::wstring xuChar; // 自定义显示字（预览/应用共用）
+    bool    suppressChar = false;  // EN_CHANGE 重入保护
 };
+
+// 判断是否为 CJK 汉字（BMP：扩展A 0x3400-0x4DBF、基本汉字 0x4E00-0x9FFF、兼容汉字 0xF900-0xFAFF）
+static bool IsHan(wchar_t c) {
+    return (c >= 0x3400 && c <= 0x4DBF) ||
+           (c >= 0x4E00 && c <= 0x9FFF) ||
+           (c >= 0xF900 && c <= 0xFAFF);
+}
+// 仅保留第一个汉字字符；非汉字全部丢弃；最多 1 个汉字（空串表示用默认“虚”）
+static std::wstring NormalizeHan(const std::wstring& s) {
+    for (wchar_t c : s) {
+        if (IsHan(c))
+            return std::wstring(1, c);
+    }
+    return std::wstring();
+}
 
 // 解析 RRGGBB 十六进制颜色；失败返回默认值
 static COLORREF ParseHexColor(const wchar_t* s, COLORREF def) {
@@ -54,16 +70,15 @@ static void ApplySettings(HWND hDlg, DlgData* dlg) {
     g_plugin.SetCheckInterval(iv);
     g_plugin.SetAutoFix(af);     // SetAutoFix 内部已 SaveConfig
 
-    // “虚”字外观：字体名 / 粗体 / 字号
-    wchar_t nm[64]; GetWindowTextW(GetDlgItem(hDlg, IDC_S_FONT), nm, _countof(nm));
-    bool bold = (IsDlgButtonChecked(hDlg, IDC_S_BOLD) == BST_CHECKED);
-    wchar_t sz[8];  GetWindowTextW(GetDlgItem(hDlg, IDC_S_SIZE), sz, _countof(sz));
-    int size = _wtoi(sz);
-    if (size < 6)  size = 6;
-    if (size > 72) size = 72;
-    g_plugin.SetIconFontName(nm);
-    g_plugin.SetIconFontBold(bold);
-    g_plugin.SetIconFontSize(size);
+    // “虚”字外观：字体名 / 粗体 / 字号（来自字体对话框结果，暂存于 DlgData）
+    g_plugin.SetIconFontName(dlg->fontName);
+    g_plugin.SetIconFontBold(dlg->bold);
+    g_plugin.SetIconFontSize(dlg->fontSize);
+
+    // 自定义显示字：限单个汉字（空 → 默认“虚”）
+    wchar_t chbuf[64]; GetWindowTextW(GetDlgItem(hDlg, IDC_S_CHAR), chbuf, _countof(chbuf));
+    std::wstring han = NormalizeHan(chbuf);
+    g_plugin.SetIconChar(han.empty() ? L"虚" : han);
 
     g_plugin.SaveConfig();
     g_plugin.RefreshTooltip();   // 配置立即生效：刷新 Tooltip 文本
@@ -76,51 +91,40 @@ static BOOL CALLBACK SetChildFont(HWND h, LPARAM lp) {
     return TRUE;
 }
 
-// 按“虚”字设置创建字体（调用方负责 DeleteObject）
-static HFONT MakeIconFont(const std::wstring& name, bool bold, int size) {
-    return CreateFontW(-size, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
+// 屏幕垂直 DPI（磅↔像素换算用）
+static int ScreenDpi() {
+    HDC dc = GetDC(nullptr);
+    int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+    ReleaseDC(nullptr, dc);
+    return dpi;
+}
+
+// 按“虚”字设置创建字体（sizePt 为磅值，按屏幕 DPI 换算像素；调用方负责 DeleteObject）
+static HFONT MakeIconFont(const std::wstring& name, bool bold, int sizePt) {
+    if (sizePt < 6)  sizePt = 6;
+    if (sizePt > 72) sizePt = 72;
+    return CreateFontW(-MulDiv(sizePt, ScreenDpi(), 72), 0, 0, 0,
+                       bold ? FW_BOLD : FW_NORMAL,
                        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                        name.empty() ? L"Microsoft YaHei" : name.c_str());
 }
 
-// 常用字号（下拉列表）
-static const int kIconSizes[] = {8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48};
-
-// 枚举系统字体填充“虚”字字体下拉框（去重，跳过 @ 竖向变体）
-struct FontEnumCtx {
-    HWND        hCombo;
-    std::wstring cur;
-    int         sel;
-};
-static int CALLBACK EnumFontProc(const LOGFONTW* lf, const TEXTMETRICW*,
-                                 DWORD, LPARAM lp) {
-    FontEnumCtx* ctx = (FontEnumCtx*)lp;
-    if (lf->lfFaceName[0] == L'@') return 1;
-    if (SendMessageW(ctx->hCombo, CB_FINDSTRINGEXACT, -1,
-                     (LPARAM)lf->lfFaceName) != CB_ERR)
-        return 1;                                  // 已存在，去重
-    int idx = (int)SendMessageW(ctx->hCombo, CB_ADDSTRING, 0,
-                                (LPARAM)lf->lfFaceName);
-    if (ctx->cur == lf->lfFaceName) ctx->sel = idx;
-    return 1;
+// 更新“字体”按钮上的摘要文本（如：微软雅黑 12pt (粗体)）
+static void UpdateFontBtnText(HWND hDlg, DlgData* dlg) {
+    wchar_t txt[96];
+    swprintf_s(txt, _countof(txt), L"%s  %dpt (%s)",
+               dlg->fontName.c_str(), dlg->fontSize, dlg->bold ? L"粗体" : L"常规");
+    SetWindowTextW(GetDlgItem(hDlg, IDC_S_FONTBTN), txt);
 }
 
-// 依据当前控件重建“虚”字预览字体并重绘预览
+// 依据 DlgData 当前字体设置重建“虚”字预览并更新字体按钮文本
 static void UpdateIconPreviewFont(HWND hDlg, DlgData* dlg) {
-    wchar_t nm[64]; GetWindowTextW(GetDlgItem(hDlg, IDC_S_FONT), nm, _countof(nm));
-    bool bold = (IsDlgButtonChecked(hDlg, IDC_S_BOLD) == BST_CHECKED);
-    wchar_t sz[8];  GetWindowTextW(GetDlgItem(hDlg, IDC_S_SIZE), sz, _countof(sz));
-    int size = _wtoi(sz);
-    if (size < 6)  size = 6;
-    if (size > 72) size = 72;
-    dlg->fontName = nm;
-    dlg->bold     = bold;
-    dlg->fontSize = size;
     if (dlg->iconFont) DeleteObject(dlg->iconFont);
     dlg->iconFont = MakeIconFont(dlg->fontName, dlg->bold, dlg->fontSize);
     InvalidateRect(GetDlgItem(hDlg, IDC_S_PREVIEW2), nullptr, TRUE);
+    UpdateFontBtnText(hDlg, dlg);
 }
 
 // 创建设置对话框的所有子控件并初始化
@@ -135,89 +139,79 @@ static void BuildSettingsControls(HWND hDlg) {
     dlg->fontName = g_plugin.GetIconFontName();
     dlg->bold     = g_plugin.GetIconFontBold();
     dlg->fontSize = g_plugin.GetIconFontSize();
+    dlg->xuChar   = g_plugin.GetIconChar();
     dlg->iconFont = MakeIconFont(dlg->fontName, dlg->bold, dlg->fontSize);
     SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)dlg);
 
     CreateWindowExW(0, L"STATIC", L"图标颜色：",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, 15, 22, 80, 22, hDlg, nullptr, hInst, nullptr);
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 28, 140, 30, hDlg, nullptr, hInst, nullptr);
     CreateWindowExW(0, L"STATIC", L"  ",
-        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_SUNKEN, 100, 20, 42, 22, hDlg,
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_SUNKEN, 162, 24, 54, 34, hDlg,
         (HMENU)(INT_PTR)IDC_S_PREVIEW, hInst, nullptr);
     CreateWindowExW(0, L"BUTTON", L"选择颜色...",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 150, 19, 95, 24, hDlg,
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 22, 120, 38, hDlg,
         (HMENU)(INT_PTR)IDC_S_CHOOSECOLOR, hInst, nullptr);
 
     CreateWindowExW(0, L"BUTTON", L"自动修复（守护）",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 15, 60, 200, 22, hDlg,
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 18, 86, 290, 32, hDlg,
         (HMENU)(INT_PTR)IDC_S_AUTOFIX, hInst, nullptr);
 
     CreateWindowExW(0, L"STATIC", L"检查间隔(秒)：",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, 15, 94, 90, 22, hDlg, nullptr, hInst, nullptr);
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 144, 150, 30, hDlg, nullptr, hInst, nullptr);
     wchar_t iv[16];
     swprintf_s(iv, _countof(iv), L"%d", dlg->interval);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", iv,
-        WS_CHILD | WS_VISIBLE | ES_NUMBER, 110, 92, 60, 22, hDlg,
+        WS_CHILD | WS_VISIBLE | ES_NUMBER, 174, 140, 74, 34, hDlg,
         (HMENU)(INT_PTR)IDC_S_INTERVAL, hInst, nullptr);
 
     // —— “虚”字外观设置 ——
-    CreateWindowExW(0, L"STATIC", L"虚字字体：",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, 15, 126, 66, 22, hDlg, nullptr, hInst, nullptr);
-    CreateWindowExW(0, L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-        86, 124, 120, 200, hDlg, (HMENU)(INT_PTR)IDC_S_FONT, hInst, nullptr);
-    HWND hFontCb = GetDlgItem(hDlg, IDC_S_FONT);
-    FontEnumCtx fctx{hFontCb, std::wstring(dlg->fontName), 0};
-    HDC dc = GetDC(hDlg);
-    LOGFONTW lf{}; lf.lfCharSet = DEFAULT_CHARSET;
-    EnumFontFamiliesExW(dc, &lf, EnumFontProc, (LPARAM)&fctx, 0);
-    ReleaseDC(hDlg, dc);
-    SendMessageW(hFontCb, CB_SETCURSEL, fctx.sel, 0);
+    CreateWindowExW(0, L"STATIC", L"显示字：",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 202, 90, 30, hDlg, nullptr, hInst, nullptr);
+    // 自定义显示字输入框（仅限单个汉字，实时规范化）
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", dlg->xuChar.c_str(),
+        WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL, 112, 198, 56, 34, hDlg,
+        (HMENU)(INT_PTR)IDC_S_CHAR, hInst, nullptr);
 
-    CreateWindowExW(0, L"BUTTON", L"粗体",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 214, 126, 60, 22, hDlg,
-        (HMENU)(INT_PTR)IDC_S_BOLD, hInst, nullptr);
-    if (dlg->bold) CheckDlgButton(hDlg, IDC_S_BOLD, BST_CHECKED);
-
-    CreateWindowExW(0, L"STATIC", L"字号：",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, 15, 158, 44, 22, hDlg, nullptr, hInst, nullptr);
-    CreateWindowExW(0, L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-        62, 156, 56, 200, hDlg, (HMENU)(INT_PTR)IDC_S_SIZE, hInst, nullptr);
-    HWND hSizeCb = GetDlgItem(hDlg, IDC_S_SIZE);
-    int sizeSel = 0;
-    for (int i = 0; i < (int)_countof(kIconSizes); ++i) {
-        wchar_t s[8]; swprintf_s(s, _countof(s), L"%d", kIconSizes[i]);
-        int idx = (int)SendMessageW(hSizeCb, CB_ADDSTRING, 0, (LPARAM)s);
-        if (kIconSizes[i] == dlg->fontSize) sizeSel = idx;
-    }
-    SendMessageW(hSizeCb, CB_SETCURSEL, sizeSel, 0);
-
-    // “虚”字预览（所见即所得：字体 + 粗体 + 字号 + 颜色）
-    CreateWindowExW(0, L"STATIC", L"虚",
-        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_SUNKEN, 150, 154, 54, 28, hDlg,
+    CreateWindowExW(0, L"STATIC", L"预览：",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 200, 202, 60, 30, hDlg, nullptr, hInst, nullptr);
+    // “虚”字预览（所见即所得：字体 + 粗体 + 字号 + 颜色 + 自定义字）
+    CreateWindowExW(0, L"STATIC", dlg->xuChar.c_str(),
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_SUNKEN, 264, 196, 80, 54, hDlg,
         (HMENU)(INT_PTR)IDC_S_PREVIEW2, hInst, nullptr);
+
+    // “虚”字字体：一个按钮打开系统字体对话框（字体 / 字重 / 字号一起选）
+    CreateWindowExW(0, L"STATIC", L"字体：",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 264, 70, 30, hDlg, nullptr, hInst, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 92, 258, 250, 40, hDlg,
+        (HMENU)(INT_PTR)IDC_S_FONTBTN, hInst, nullptr);
 
     // —— 底部按钮 ——
     CreateWindowExW(0, L"BUTTON", L"应用",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 50, 210, 70, 26, hDlg,
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 66, 308, 92, 36, hDlg,
         (HMENU)(INT_PTR)IDC_S_APPLY, hInst, nullptr);
     CreateWindowExW(0, L"BUTTON", L"确认",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON, 140, 210, 70, 26, hDlg,
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON, 178, 308, 92, 36, hDlg,
         (HMENU)(INT_PTR)IDOK, hInst, nullptr);
     CreateWindowExW(0, L"BUTTON", L"取消",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 210, 70, 26, hDlg,
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, 308, 92, 36, hDlg,
         (HMENU)(INT_PTR)IDCANCEL, hInst, nullptr);
 
     SendMessageW(GetDlgItem(hDlg, IDC_S_AUTOFIX), BM_SETCHECK,
         dlg->autoFix ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    // 设置界面字体统一为微软雅黑 12px：对话框与全部子控件
-    dlg->font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    // 设置界面字体统一为微软雅黑 10pt（按 DPI 缩放）：对话框与全部子控件
+    HDC sdc = GetDC(hDlg);
+    int dpi = GetDeviceCaps(sdc, LOGPIXELSY);
+    ReleaseDC(hDlg, sdc);
+    dlg->font = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                             L"Microsoft YaHei");
     SendMessageW(hDlg, WM_SETFONT, (WPARAM)dlg->font, TRUE);
     EnumChildWindows(hDlg, SetChildFont, (LPARAM)dlg->font);
+
+    UpdateFontBtnText(hDlg, dlg);   // 字体按钮摘要文本（如：微软雅黑 12pt (常规)）
 }
 
 static const wchar_t* kSettingsClass = L"DragFullSettingsCls";
@@ -249,7 +243,8 @@ CDragFullPlugin& CDragFullPlugin::Instance() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// 只有一个显示项，index 必须为 0，其它一律返回 nullptr
+// 只有一个显示项，index 必须为 0，其它一律返回 nullptr。
+// 显示项显示在 TrafficMonitor 显示区（「英」等内置输入法项的右边）。
 IPluginItem* CDragFullPlugin::GetItem(int index) {
     return (index == 0) ? &m_item : nullptr;
 }
@@ -282,7 +277,7 @@ void CDragFullPlugin::DataRequired() {
 
     m_state = now;
 
-    // Tooltip：状态变化时立即重建；否则每 5 个周期重建一次（DWM/进程扫描较重）
+    // 诊断文本：状态变化时立即重建；否则每 5 个周期重建一次（DWM/进程扫描较重）
     if (now != m_lastTooltipState || (m_cycle % 5) == 0) {
         RebuildTooltip();
         m_lastTooltipState = now;
@@ -296,6 +291,15 @@ const wchar_t* CDragFullPlugin::StateText() const {
         case DragState::Off:
         case DragState::Unknown:
         default:                    return L"关";
+    }
+}
+
+COLORREF CDragFullPlugin::StateColor() const {
+    // 检测到「拖动只剩虚线框」→ 高亮(亮红)；未被处理(被压制) → 变暗(灰)；正常 → 用户设置色
+    switch (m_state) {
+        case DragState::Off:        return RGB(255, 64, 64);   // 高亮：发现异常
+        case DragState::Suppressed: return RGB(150, 150, 150); // 变暗：未能处理
+        default:                    return m_iconColor;        // 正常：用户设置色
     }
 }
 
@@ -324,42 +328,44 @@ const wchar_t* CDragFullPlugin::GetInfo(PluginInfoIndex index) {
         case TMI_DESCRIPTION: return L"显示并一键修复「拖动窗口只剩虚线框」问题（Citrix 会关闭拖动时显示窗口内容）";
         case TMI_AUTHOR:      return L"Ben";
         case TMI_COPYRIGHT:   return L"Copyright (C) 2026";
-        case TMI_VERSION:     return L"V2026.10.23.1";
+        case TMI_VERSION:     return L"V2026.10.23.4";
         case TMI_URL:         return L"";
         default:              return L"";
     }
 }
 
 const wchar_t* CDragFullPlugin::GetTooltipInfo() {
-    return m_tooltip.c_str();
+    return L"";   // 不在 TrafficMonitor 界面显示插件内容；诊断详情见托盘右键菜单
 }
 
 void CDragFullPlugin::OnInitialize(ITrafficMonitor* pApp) {
     m_app = pApp;
     if (pApp)
         LoadConfig(std::wstring(pApp->GetPluginConfigDir()));
-    // 先探一次，避免首屏 Tooltip 为空
+    // 先探一次，避免首屏状态为空
     m_state = DragFullWindows::Read() ? DragState::On : DragState::Off;
     RebuildTooltip();
     m_lastTooltipState = m_state;
 }
 
 int CDragFullPlugin::GetCommandCount() {
-    return 2;   // 0: 立即修复  1: 自动修复（守护）
+    return 3;   // 0: 立即修复  1: 自动修复（守护）  2: 诊断详情
 }
 
 const wchar_t* CDragFullPlugin::GetCommandName(int command_index) {
     switch (command_index) {
         case 0: return L"立即修复";
         case 1: return L"自动修复（守护）";
+        case 2: return L"诊断详情";
         default: return nullptr;
     }
 }
 
-void CDragFullPlugin::OnPluginCommand(int command_index, void* /*hWnd*/, void* /*para*/) {
+void CDragFullPlugin::OnPluginCommand(int command_index, void* hWnd, void* /*para*/) {
     switch (command_index) {
         case 0: FixNow(); break;
         case 1: SetAutoFix(!m_autoFix); break;
+        case 2: ShowDiagDialog(hWnd); break;
         default: break;
     }
 }
@@ -392,7 +398,7 @@ void CDragFullPlugin::LoadConfig(const std::wstring& config_dir) {
     if (iv > 3600)  iv = 3600;
     m_checkIntervalSec = iv;
 
-    // “虚”字外观：字体 / 粗体 / 字号
+    // “虚”字外观：字体 / 粗体 / 字号（磅值 pt，绘制时按 DPI 换算像素）
     wchar_t fbuf[64] = {0};
     GetPrivateProfileStringW(L"Settings", L"IconFontName", L"微软雅黑", fbuf, 64, ini);
     m_iconFontName = fbuf;
@@ -401,6 +407,13 @@ void CDragFullPlugin::LoadConfig(const std::wstring& config_dir) {
     if (fs < 6)  fs = 6;
     if (fs > 72) fs = 72;
     m_iconFontSize = fs;
+
+    // 自定义显示字（默认“虚”）
+    wchar_t cbuf[16] = {0};
+    GetPrivateProfileStringW(L"Settings", L"IconChar", L"虚", cbuf, 16, ini);
+    m_iconChar = cbuf;
+    if (m_iconChar.empty())
+        m_iconChar = L"虚";
 }
 
 void CDragFullPlugin::SaveConfig() const {
@@ -426,6 +439,8 @@ void CDragFullPlugin::SaveConfig() const {
     wchar_t sz[8];
     swprintf_s(sz, _countof(sz), L"%d", m_iconFontSize);
     WritePrivateProfileStringW(L"Settings", L"IconFontSize", sz, ini);
+
+    WritePrivateProfileStringW(L"Settings", L"IconChar", m_iconChar.c_str(), ini);
 }
 
 void CDragFullPlugin::RebuildTooltip() {
@@ -444,7 +459,9 @@ void CDragFullPlugin::RebuildTooltip() {
     s += DragFullWindows::IsDwmCompositionEnabled() ? L"已启用" : L"已关闭(此时等效关)";
     s += L"\nCitrix 会话: ";
     s += DragFullWindows::IsCitrixSessionRunning() ? L"运行中(可能压制)" : L"未运行";
-    s += L"\n\n左键单击 = 立即修复    右键 = 菜单";
+    s += L"\n\n双击「";
+    s += m_iconChar;
+    s += L"」字 = 立即修复    右键 = 菜单";
     m_tooltip = s;
 }
 
@@ -455,6 +472,12 @@ bool CDragFullPlugin::ShouldRetry() const {
     return (GetTickCount64() - m_lastSuppressTick) > 30000ULL;
 }
 
+void CDragFullPlugin::ShowDiagDialog(void* hParent) {
+    RefreshTooltip();
+    MessageBoxW(reinterpret_cast<HWND>(hParent), m_tooltip.c_str(),
+                L"拖动显示修复 - 诊断详情", MB_OK | MB_ICONINFORMATION);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // DLL 导出：返回全局单例（框架不负责释放）
 void CDragFullPlugin::RefreshTooltip() {
@@ -463,7 +486,11 @@ void CDragFullPlugin::RefreshTooltip() {
 }
 
 HFONT CDragFullPlugin::CreateIconFont() const {
-    return CreateFontW(-m_iconFontSize, 0, 0, 0,
+    // m_iconFontSize 为磅值，按屏幕 DPI 换算为像素高度
+    HDC dc = GetDC(nullptr);
+    int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+    ReleaseDC(nullptr, dc);
+    return CreateFontW(-MulDiv(m_iconFontSize, dpi, 72), 0, 0, 0,
                        m_iconFontBold ? FW_BOLD : FW_NORMAL,
                        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -482,13 +509,17 @@ INT_PTR CALLBACK CDragFullPlugin::SettingsDlgProc(HWND hDlg, UINT msg,
         int code = (int)HIWORD(wParam);
         DlgData* dlg = (DlgData*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
 
-        // “虚”字外观实时预览：字体 / 字号 / 粗体 变更即重建预览
-        if (id == IDC_S_FONT || id == IDC_S_SIZE) {
-            if (code == CBN_SELCHANGE)
-                UpdateIconPreviewFont(hDlg, dlg);
-        } else if (id == IDC_S_BOLD) {
-            if (code == BN_CLICKED)
-                UpdateIconPreviewFont(hDlg, dlg);
+        if (id == IDC_S_CHAR && code == EN_CHANGE && dlg && !dlg->suppressChar) {
+            // 实时限制为单个汉字：丢弃非汉字、仅保留第一个汉字
+            dlg->suppressChar = true;
+            wchar_t buf[64]; GetWindowTextW(GetDlgItem(hDlg, IDC_S_CHAR), buf, _countof(buf));
+            std::wstring norm = NormalizeHan(buf);
+            if (norm != std::wstring(buf))
+                SetWindowTextW(GetDlgItem(hDlg, IDC_S_CHAR), norm.c_str());
+            const wchar_t* pv = norm.empty() ? L"虚" : norm.c_str();
+            SetWindowTextW(GetDlgItem(hDlg, IDC_S_PREVIEW2), pv);   // 预览实时跟随
+            dlg->xuChar = norm.empty() ? L"虚" : norm;
+            dlg->suppressChar = false;
         } else if (code == BN_CLICKED) {
             if (id == IDC_S_CHOOSECOLOR) {
                 CHOOSECOLORW cc{};
@@ -504,6 +535,27 @@ INT_PTR CALLBACK CDragFullPlugin::SettingsDlgProc(HWND hDlg, UINT msg,
                     dlg->brush = CreateSolidBrush(dlg->color);
                     InvalidateRect(GetDlgItem(hDlg, IDC_S_PREVIEW), nullptr, TRUE);
                     InvalidateRect(GetDlgItem(hDlg, IDC_S_PREVIEW2), nullptr, TRUE);
+                }
+            } else if (id == IDC_S_FONTBTN) {
+                // 系统字体对话框：一次选定字体 / 字重 / 字号（参考输入法状态插件样式）
+                LOGFONTW lf{};
+                wcsncpy_s(lf.lfFaceName, dlg->fontName.c_str(), _TRUNCATE);
+                lf.lfHeight  = -MulDiv(dlg->fontSize, ScreenDpi(), 72);
+                lf.lfWeight  = dlg->bold ? FW_BOLD : FW_NORMAL;
+                lf.lfCharSet = DEFAULT_CHARSET;
+                CHOOSEFONTW cf{};
+                cf.lStructSize = sizeof(cf);
+                cf.hwndOwner   = hDlg;
+                cf.lpLogFont   = &lf;
+                cf.Flags       = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS | CF_EFFECTS;
+                if (ChooseFontW(&cf) && lf.lfFaceName[0] != L'\0') {
+                    dlg->fontName = lf.lfFaceName;
+                    dlg->bold     = (lf.lfWeight >= FW_SEMIBOLD);
+                    int pt = MulDiv(-lf.lfHeight, 72, ScreenDpi());
+                    if (pt < 6)  pt = 6;
+                    if (pt > 72) pt = 72;
+                    dlg->fontSize = pt;
+                    UpdateIconPreviewFont(hDlg, dlg);   // 预览 + 按钮文本即时更新
                 }
             } else if (id == IDC_S_APPLY) {
                 ApplySettings(hDlg, dlg);     // 应用：立即生效，不关闭
@@ -565,7 +617,11 @@ ITMPlugin::OptionReturn CDragFullPlugin::ShowOptionsDialog(void* hParent) {
     HWND hParentWnd = reinterpret_cast<HWND>(hParent);
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
-    int w = 340, h = 252;
+    // 客户区 420x356（宽松间距），用 AdjustWindowRect 补上标题栏/边框——否则底部按钮会被裁掉
+    RECT wr = {0, 0, 420, 356};
+    AdjustWindowRect(&wr, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE);
+    int w = wr.right - wr.left;
+    int h = wr.bottom - wr.top;
     int x = (sw - w) / 2;
     int y = (sh - h) / 2;
 
