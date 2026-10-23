@@ -10,7 +10,7 @@
 //   - 在 TrafficMonitor 显示区显示「虚」字（插件项默认排在「英」等内置输入法项的右边）。
 //   - 「虚」字状态着色：检测到「拖动只剩虚线框」→ 高亮(亮红)；未被处理(被压制) → 变暗(灰)；
 //     正常开启 → 用户设置色（默认绿）。
-//   - 双击「虚」字 → 立即修复；显示项右键 → 宿主菜单（立即修复 / 自动修复 / 诊断详情）。
+//   - 双击「虚」字 → 按需修复（正常则不修复，仅提示）；显示项右键 → 宿主菜单（立即修复 / 自动修复 / 诊断详情）。
 //   - 开启「自动修复」后，宿主每秒调用的 DataRequired() 会替你守护：Citrix 一关掉就秒恢复。
 class CDragFullPlugin : public ITMPlugin {
 public:
@@ -35,6 +35,7 @@ public:
     const wchar_t* StateText() const;   // L"开" / L"关" / L"被压制"
     COLORREF StateColor() const;        // 按状态着色：高亮(亮红) / 变暗(灰) / 用户色
     void FixNow();                      // 立即执行一次修复
+    void FixNowIfNeeded();              // 双击“虚”字：仅异常时修复，正常则提示无需修复
     bool IsAutoFix() const { return m_autoFix; }
     void SetAutoFix(bool v);
 

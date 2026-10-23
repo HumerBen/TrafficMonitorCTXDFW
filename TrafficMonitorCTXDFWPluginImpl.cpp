@@ -308,13 +308,14 @@ void CDragFullPlugin::FixNow() {
     m_state = r;
     RebuildTooltip();
     m_lastTooltipState = r;
+    // 双击“虚”字与“立即修复”命令均静默，不弹气泡（用户要求）
+}
 
-    if (m_app) {
-        if (r == DragState::On)
-            m_app->ShowNotifyMessage(L"已修复：拖动窗口现在显示内容");
-        else if (r == DragState::Suppressed)
-            m_app->ShowNotifyMessage(L"修复失败：可能被 Citrix 持续压制，请退出虚拟应用后重试");
-    }
+void CDragFullPlugin::FixNowIfNeeded() {
+    // 双击“虚”字：先判真实状态，正常则跳过修复（静默，不弹气泡）
+    if (DragFullWindows::Read())
+        return;
+    FixNow();
 }
 
 void CDragFullPlugin::SetAutoFix(bool v) {
@@ -328,7 +329,7 @@ const wchar_t* CDragFullPlugin::GetInfo(PluginInfoIndex index) {
         case TMI_DESCRIPTION: return L"显示并一键修复「拖动窗口只剩虚线框」问题（Citrix 会关闭拖动时显示窗口内容）";
         case TMI_AUTHOR:      return L"Ben";
         case TMI_COPYRIGHT:   return L"Copyright (C) 2026";
-        case TMI_VERSION:     return L"V2026.10.23.4";
+        case TMI_VERSION:     return L"V2026.10.23.6";
         case TMI_URL:         return L"";
         default:              return L"";
     }
@@ -461,7 +462,7 @@ void CDragFullPlugin::RebuildTooltip() {
     s += DragFullWindows::IsCitrixSessionRunning() ? L"运行中(可能压制)" : L"未运行";
     s += L"\n\n双击「";
     s += m_iconChar;
-    s += L"」字 = 立即修复    右键 = 菜单";
+    s += L"」字 = 修复(正常免)    右键 = 菜单";
     m_tooltip = s;
 }
 

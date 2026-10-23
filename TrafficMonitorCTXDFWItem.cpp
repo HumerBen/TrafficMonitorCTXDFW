@@ -76,8 +76,8 @@ void CDragFullItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dark_
 int CDragFullItem::OnMouseEvent(MouseEventType type, int /*x*/, int /*y*/,
                                 void* /*hWnd*/, int /*flag*/) {
     if (type == MT_DBCLICKED) {
-        g_plugin.FixNow();   // 双击「虚」字 → 立即修复
-        return 1;            // 已完整处理，宿主不再做额外响应
+        g_plugin.FixNowIfNeeded();   // 双击「虚」字 → 仅在异常时修复（正常则提示）
+        return 1;                    // 已完整处理，宿主不再做额外响应
     }
     // 其余（单击/右键等）交给宿主默认处理（右键菜单仍由宿主提供插件命令）
     return 0;
