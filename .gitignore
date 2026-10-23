@@ -1,0 +1,13 @@
+# ---- Build outputs ----
+bin/
+*.A6E2C119/
+.vs/
+
+# ---- Visual Studio per-user settings ----
+*.user
+
+# ---- Independent repo: .codebuddy is managed separately ----
+.codebuddy/
+
+# ---- Chat history exports (may contain sensitive session data) ----
+ChatHistoryExport/
