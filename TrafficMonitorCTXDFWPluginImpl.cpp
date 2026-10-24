@@ -37,13 +37,23 @@ static bool IsHan(wchar_t c) {
            (c >= 0x4E00 && c <= 0x9FFF) ||
            (c >= 0xF900 && c <= 0xFAFF);
 }
-// 仅保留第一个汉字字符；非汉字全部丢弃；最多 1 个汉字（空串表示用默认“虚”）
-static std::wstring NormalizeHan(const std::wstring& s) {
+// 是否为英文字母（a-z / A-Z）
+static bool IsLatinLetter(wchar_t c) {
+    return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z');
+}
+// 显示字规范化：仅保留汉字或英文字母，最多 kMaxIconChars 个；其余丢弃（空串表示用默认“虚”）
+static const size_t kMaxIconChars = 3;
+static std::wstring NormalizeIconText(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(kMaxIconChars);
     for (wchar_t c : s) {
-        if (IsHan(c))
-            return std::wstring(1, c);
+        if (IsHan(c) || IsLatinLetter(c)) {
+            out += c;
+            if (out.size() >= kMaxIconChars)
+                break;
+        }
     }
-    return std::wstring();
+    return out;
 }
 
 // 解析 RRGGBB 十六进制颜色；失败返回默认值
@@ -75,9 +85,9 @@ static void ApplySettings(HWND hDlg, DlgData* dlg) {
     g_plugin.SetIconFontBold(dlg->bold);
     g_plugin.SetIconFontSize(dlg->fontSize);
 
-    // 自定义显示字：限单个汉字（空 → 默认“虚”）
+    // 自定义显示字：限汉字或英文字母，最多 3 个（空 → 默认“虚”）
     wchar_t chbuf[64]; GetWindowTextW(GetDlgItem(hDlg, IDC_S_CHAR), chbuf, _countof(chbuf));
-    std::wstring han = NormalizeHan(chbuf);
+    std::wstring han = NormalizeIconText(chbuf);
     g_plugin.SetIconChar(han.empty() ? L"虚" : han);
 
     g_plugin.SaveConfig();
@@ -167,9 +177,9 @@ static void BuildSettingsControls(HWND hDlg) {
     // —— “虚”字外观设置 ——
     CreateWindowExW(0, L"STATIC", L"显示字：",
         WS_CHILD | WS_VISIBLE | SS_LEFT, 18, 202, 90, 30, hDlg, nullptr, hInst, nullptr);
-    // 自定义显示字输入框（仅限单个汉字，实时规范化）
+    // 自定义显示字输入框（仅限汉字或英文字母，最多 3 个，实时规范化）
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", dlg->xuChar.c_str(),
-        WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL, 112, 198, 56, 34, hDlg,
+        WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL, 112, 198, 72, 34, hDlg,
         (HMENU)(INT_PTR)IDC_S_CHAR, hInst, nullptr);
 
     CreateWindowExW(0, L"STATIC", L"预览：",
@@ -329,7 +339,7 @@ const wchar_t* CDragFullPlugin::GetInfo(PluginInfoIndex index) {
         case TMI_DESCRIPTION: return L"显示并一键修复「拖动窗口只剩虚线框」问题（Citrix 会关闭拖动时显示窗口内容）";
         case TMI_AUTHOR:      return L"Ben";
         case TMI_COPYRIGHT:   return L"Copyright (C) 2026";
-        case TMI_VERSION:     return L"V2026.10.23.6";
+        case TMI_VERSION:     return L"V2026.10.24.1";
         case TMI_URL:         return L"";
         default:              return L"";
     }
@@ -514,7 +524,7 @@ INT_PTR CALLBACK CDragFullPlugin::SettingsDlgProc(HWND hDlg, UINT msg,
             // 实时限制为单个汉字：丢弃非汉字、仅保留第一个汉字
             dlg->suppressChar = true;
             wchar_t buf[64]; GetWindowTextW(GetDlgItem(hDlg, IDC_S_CHAR), buf, _countof(buf));
-            std::wstring norm = NormalizeHan(buf);
+            std::wstring norm = NormalizeIconText(buf);
             if (norm != std::wstring(buf))
                 SetWindowTextW(GetDlgItem(hDlg, IDC_S_CHAR), norm.c_str());
             const wchar_t* pv = norm.empty() ? L"虚" : norm.c_str();
