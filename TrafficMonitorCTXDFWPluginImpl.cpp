@@ -339,7 +339,7 @@ const wchar_t* CDragFullPlugin::GetInfo(PluginInfoIndex index) {
         case TMI_DESCRIPTION: return L"显示并一键修复「拖动窗口只剩虚线框」问题（Citrix 会关闭拖动时显示窗口内容）";
         case TMI_AUTHOR:      return L"Ben";
         case TMI_COPYRIGHT:   return L"Copyright (C) 2026";
-        case TMI_VERSION:     return L"V2026.10.24.1";
+        case TMI_VERSION:     return L"V2026.10.28.1";
         case TMI_URL:         return L"";
         default:              return L"";
     }

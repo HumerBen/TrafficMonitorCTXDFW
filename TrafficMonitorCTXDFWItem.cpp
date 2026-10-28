@@ -59,14 +59,11 @@ void CDragFullItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dark_
 
     const wchar_t* icon = g_plugin.GetIconChar().c_str();
 
-    // 垂直居中
-    TEXTMETRIC tm = {0};
-    GetTextMetrics(dc, &tm);
-    int ty = y + (h - tm.tmHeight) / 2;
-
-    // 画“虚”字
+    // 与 TrafficMonitorIME(「中/英」)保持一致：在宿主给定的整列矩形内水平+垂直居中绘制，
+    // 保证同列配对的「虚」「中」两字左右对齐（宿主对自绘项不做对齐补偿）
+    RECT rc = { x, y, x + w, y + h };
     SetTextColor(dc, iconColor);
-    TextOutW(dc, x + 5, ty, icon, static_cast<int>(wcslen(icon)));
+    DrawTextW(dc, icon, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(dc, hOld);
     DeleteObject(hFont);
